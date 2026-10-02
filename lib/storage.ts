@@ -1,4 +1,4 @@
-import { RecentHousehold } from "@/types";
+import { RecentHousehold, Household, DailyMealLog } from "@/types";
 
 const COOKIE_KEYS = {
   CURRENT_HOUSEHOLD_ID: "feedy_current_household_id",
@@ -178,3 +178,64 @@ export function recordRecentHousehold(household: {
     localStorage.setItem(STORAGE_KEYS.RECENT_HOUSEHOLDS, JSON.stringify(updated));
   } catch (_) {}
 }
+
+// -------------------------------------------------------------
+// Synchronous Local Snapshot Cache (0ms Instant Render & SWR)
+// -------------------------------------------------------------
+
+export function getCachedHousehold(targetId?: string | null): Household | null {
+  if (typeof window === "undefined") return null;
+  const id = targetId || getStoredHouseholdId();
+  if (!id) return null;
+
+  try {
+    const raw = localStorage.getItem(`feedy_cached_household_${id}`);
+    if (raw) return JSON.parse(raw);
+  } catch (_) {}
+
+  // Fallback to recent households list
+  const recents = getRecentHouseholds();
+  const found = recents.find((r) => r.id === id);
+  if (found) {
+    return {
+      id: found.id,
+      joinCode: found.id,
+      petName: found.petName,
+      petPhotoUrl: found.petPhotoUrl,
+      createdAt: 0,
+    };
+  }
+  return null;
+}
+
+export function setCachedHousehold(household: Household) {
+  if (typeof window === "undefined" || !household?.id) return;
+  try {
+    localStorage.setItem(`feedy_cached_household_${household.id}`, JSON.stringify(household));
+  } catch (_) {}
+}
+
+export function getCachedMealLog(householdId: string | null, dateStr: string): DailyMealLog | null {
+  if (typeof window === "undefined" || !householdId || !dateStr) return null;
+  try {
+    const key = `feedy_log_${householdId}_${dateStr}`;
+    const legacyKey = `nomciu_log_${householdId}_${dateStr}`;
+    const raw = localStorage.getItem(key) || localStorage.getItem(legacyKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.breakfast && parsed.lunch && parsed.dinner) {
+        return parsed;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+export function setCachedMealLog(householdId: string | null, dateStr: string, log: DailyMealLog) {
+  if (typeof window === "undefined" || !householdId || !dateStr) return;
+  try {
+    const key = `feedy_log_${householdId}_${dateStr}`;
+    localStorage.setItem(key, JSON.stringify(log));
+  } catch (_) {}
+}
+

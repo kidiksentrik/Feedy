@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { Copy, Check, Users, Sparkles, LogOut, Bell } from "lucide-react";
+import { Copy, Check, Users, Sparkles, LogOut, Bell, RefreshCw } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface NavbarProps {
@@ -9,6 +9,9 @@ interface NavbarProps {
   feederName: string;
   isDemoMode: boolean;
   isPushSubscribed?: boolean;
+  isSyncing?: boolean;
+  lastSyncedAt?: number | null;
+  onRefresh?: () => void;
   onOpenInvite: () => void;
   onSwitchHousehold: () => void;
   onChangeNickname: () => void;
@@ -16,11 +19,24 @@ interface NavbarProps {
   onSendTestPush?: () => void;
 }
 
+function getRelativeSyncText(timestamp: number | null): string {
+  if (!timestamp) return "Just now";
+  const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+  if (diffSec < 45) return "Just now";
+  if (diffSec < 120) return "1m ago";
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ago`;
+}
+
 export const Navbar: React.FC<NavbarProps> = ({
   joinCode,
   feederName,
   isDemoMode,
   isPushSubscribed,
+  isSyncing,
+  lastSyncedAt,
+  onRefresh,
   onOpenInvite,
   onSwitchHousehold,
   onChangeNickname,
@@ -51,12 +67,41 @@ export const Navbar: React.FC<NavbarProps> = ({
           <h1 className="font-black text-lg tracking-tight text-white flex items-center gap-1.5 leading-none">
             Feedy
           </h1>
-          <div className="flex items-center gap-1 mt-0.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-[10px] font-bold text-emerald-400/90 tracking-wide uppercase">
-              {isDemoMode ? "Demo" : "Live"}
+          <button
+            onClick={() => {
+              if (typeof navigator !== "undefined" && navigator.vibrate) {
+                try {
+                  navigator.vibrate(30);
+                } catch (_) {}
+              }
+              onRefresh?.();
+            }}
+            disabled={isSyncing}
+            title="Tap to refresh with server"
+            className="flex items-center gap-1 mt-0.5 group active:scale-95 transition select-none text-left"
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                isSyncing ? "bg-amber-400 animate-ping" : "bg-emerald-400 animate-pulse"
+              }`}
+            />
+            <span className="text-[10px] font-bold tracking-wide uppercase flex items-center gap-1">
+              {isSyncing ? (
+                <>
+                  <RefreshCw className="w-2.5 h-2.5 animate-spin text-amber-400" />
+                  <span className="text-amber-300">Syncing...</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-emerald-400/90">{isDemoMode ? "Demo" : "Live"}</span>
+                  <span className="text-stone-400 font-medium lowercase text-[9.5px]">
+                    • {getRelativeSyncText(lastSyncedAt || null)}
+                  </span>
+                  <RefreshCw className="w-2.5 h-2.5 text-stone-500 group-hover:text-stone-300 transition" />
+                </>
+              )}
             </span>
-          </div>
+          </button>
         </div>
       </div>
 

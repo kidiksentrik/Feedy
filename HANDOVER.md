@@ -88,13 +88,34 @@ To prevent data loss when users remove and re-add PWA home screen icons on iOS/A
 - When users upload custom pet photos, an HTML5 Canvas downsamples the image client-side to max 400x400px (JPEG 85%, ~30KB).
 - The compressed base64 string is stored directly in the Firestore household document, enabling instant photo updates for all roommates with zero external S3/Firebase Storage billing!
 
-### E. Background Wake-Up & Push Click Real-Time Sync (`hooks/useMeals.ts` & `public/sw.js`)
-- **The Problem**: On iOS WebKit and Android, when a PWA is backgrounded/locked, the OS freezes network sockets. Tapping a lock-screen push notification brings the dormant window into focus via `client.focus()`, but Firestore's WebSocket connection takes 15–30 seconds to re-handshake, leaving the user looking at the old pre-fed state until they hard-restart the app.
+### E. Instant SWR Cache, Parallel Boot & Resilient Sync Architecture (`hooks/useMeals.ts`, `hooks/useHousehold.ts`, `lib/storage.ts`, `lib/firebase.ts`)
+- **The Problem**: 
+  1. On cold launch, `dailyLog` state previously initialized to all-false default, causing the big red `FEED` button to flash for 2–3 seconds while waiting for network responses.
+  2. A sequential network waterfall existed: `useMeals` waited for `useHousehold`'s Firestore document to finish loading before it even began fetching today's meals.
+  3. When an app was backgrounded for hours or returning from airplane/subway mode, dead sockets caused latency or failed reads, forcing users to repeatedly force-quit and restart the app ("재부팅") to verify if a meal was recorded.
 - **The Solution**:
-  1. **SW `postMessage` Bridge**: When `notificationclick` fires in `public/sw.js`, it sends a `NOTIFICATION_CLICKED` message with the meal payload to the client window before calling `client.focus()`.
-  2. **0-Second Optimistic Update**: `useMeals.ts` intercepts `NOTIFICATION_CLICKED` and immediately marks `dailyLog[mealType]` as completed so the user sees the feeding record instantly upon unlocking.
-  3. **Direct Server Re-Fetch**: Calls `getDocFromServer(logRef)` to bypass the local cache and query Firestore backend directly.
-  4. **Multi-Event Foreground Triggers**: Automatically syncs on `visibilitychange` (when returning to the app), `window.focus`, and `window.pageshow`.
+  1. **Instant Synchronous SWR Cache (0.000ms render)**:
+     - `lib/storage.ts` provides `getCachedMealLog` / `setCachedMealLog` and `getCachedHousehold` / `setCachedHousehold`.
+     - `useMeals` and `useHousehold` initialize their React state directly from local storage.
+     - If breakfast was fed at 8:00 AM, opening the app hours later renders Breakfast **already completed in 0 milliseconds** — no false `FEED` button flash, no ambiguity.
+     - `saveMealLog` writes to local storage synchronously *before* awaiting any network round-trip, ensuring that even if a user immediately closes the app after feeding, their record is preserved.
+  2. **Waterfall Elimination (Parallel Fetching)**:
+     - `useHousehold` immediately exports the stored `householdId`.
+     - `app/page.tsx` starts `useMeals` with `activeHouseholdId = household?.id || householdId || null` without waiting for the household Firestore document. Both queries run in parallel.
+     - Full-screen blocking splash loader is skipped if a household is already cached locally.
+  3. **Persistent IndexedDB Cache in Firestore (`lib/firebase.ts`)**:
+     - Configured `initializeFirestore` with `persistentLocalCache({ tabManager: persistentMultipleTabManager() })` on client side.
+     - Firestore mutations and snapshots are persisted to IndexedDB across PWA reboots, allowing offline mutation queueing.
+  4. **Fail-Fast Wake-Up & 30s Heartbeat**:
+     - `fetchFreshMealLog` executes a 2.5s race timeout against `getDocFromServer(logRef)`. If the cellular radio or network socket hangs, it instantly falls back to cached Firestore reads without freezing the UI.
+     - Wakes up on `visibilitychange`, `window.focus`, `window.pageshow`, and the `online` network reconnection event.
+     - While the app remains open on-screen, a quiet 30-second heartbeat verifies data against the server so roommate feedings show up automatically.
+  5. **Interactive Live Sync Badge & Native Pull-To-Refresh**:
+     - `components/Navbar.tsx` features an interactive sync badge:
+       - Displays amber spinning indicator during active sync (`Syncing...`).
+       - Displays pulsating emerald dot with relative timestamp when synchronized (`Live • Just now`, `Live • 2m ago`).
+       - Users can **tap the badge at any time** to trigger an instant manual re-fetch with mobile haptic feedback.
+     - `app/page.tsx` implements a native touch-driven **Pull-To-Refresh** gesture (dragging down > 48px from top) with an animated status indicator and haptic confirmation, eliminating the need to ever force-quit the app.
 
 ---
 

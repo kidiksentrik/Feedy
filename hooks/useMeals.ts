@@ -1,15 +1,27 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { DailyMealLog, MealType } from "@/types";
 import { db, isFirebaseConfigured } from "@/lib/firebase";
 import { doc, onSnapshot, setDoc, getDoc, getDocFromServer } from "firebase/firestore";
 import { getTodayDateString, formatTime, getDefaultDailyMealLog } from "@/lib/utils";
+import { getCachedMealLog, setCachedMealLog } from "@/lib/storage";
 
 export function useMeals(householdId: string | null, feederName: string) {
   const [todayDateString, setTodayDateString] = useState<string>(getTodayDateString());
-  const [dailyLog, setDailyLog] = useState<DailyMealLog>(getDefaultDailyMealLog(getTodayDateString()));
+  
+  // Instantaneous 0-delay initial render from synchronous persistent cache
+  const [dailyLog, setDailyLog] = useState<DailyMealLog>(() => {
+    const today = getTodayDateString();
+    if (householdId) {
+      const cached = getCachedMealLog(householdId, today);
+      if (cached) return cached;
+    }
+    return getDefaultDailyMealLog(today);
+  });
+
   const [isSyncing, setIsSyncing] = useState<boolean>(true);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
 
   // Check midnight date rollover every minute
   useEffect(() => {
@@ -30,6 +42,12 @@ export function useMeals(householdId: string | null, feederName: string) {
       return;
     }
 
+    // Immediately load from synchronous local cache if available (0ms)
+    const cached = getCachedMealLog(householdId, todayDateString);
+    if (cached) {
+      setDailyLog(cached);
+    }
+
     setIsSyncing(true);
 
     if (isFirebaseConfigured && db) {
@@ -38,12 +56,16 @@ export function useMeals(householdId: string | null, feederName: string) {
         logRef,
         (docSnap) => {
           if (docSnap.exists()) {
-            setDailyLog(docSnap.data() as DailyMealLog);
+            const data = docSnap.data() as DailyMealLog;
+            setDailyLog(data);
+            setCachedMealLog(householdId, todayDateString, data);
+            setLastSyncedAt(Date.now());
           } else {
             // New day or first time today: initialize default clean log
             const defaultLog = getDefaultDailyMealLog(todayDateString);
             setDailyLog(defaultLog);
-            // Optionally persist empty log or let first feeding create it
+            setCachedMealLog(householdId, todayDateString, defaultLog);
+            setLastSyncedAt(Date.now());
           }
           setIsSyncing(false);
         },
@@ -56,17 +78,21 @@ export function useMeals(householdId: string | null, feederName: string) {
       return () => unsubscribe();
     } else {
       // Local demo mode
-      const storageKey = `nomciu_log_${householdId}_${todayDateString}`;
+      const storageKey = `feedy_log_${householdId}_${todayDateString}`;
 
       const loadFromStorage = () => {
         try {
           const raw = localStorage.getItem(storageKey);
           if (raw) {
-            setDailyLog(JSON.parse(raw));
+            const parsed = JSON.parse(raw);
+            setDailyLog(parsed);
+            setCachedMealLog(householdId, todayDateString, parsed);
           } else {
             const defaultLog = getDefaultDailyMealLog(todayDateString);
             setDailyLog(defaultLog);
+            setCachedMealLog(householdId, todayDateString, defaultLog);
           }
+          setLastSyncedAt(Date.now());
         } catch (e) {
           console.error(e);
         }
@@ -77,7 +103,7 @@ export function useMeals(householdId: string | null, feederName: string) {
 
       let channel: BroadcastChannel | null = null;
       if (typeof BroadcastChannel !== "undefined") {
-        channel = new BroadcastChannel("nomciu_sync");
+        channel = new BroadcastChannel("feedy_sync");
         channel.onmessage = (event) => {
           if (event.data?.type === "MEAL_UPDATE" && event.data?.householdId === householdId) {
             loadFromStorage();
@@ -91,35 +117,48 @@ export function useMeals(householdId: string | null, feederName: string) {
     }
   }, [householdId, todayDateString]);
 
-  // Direct server fetch on wake-up / foreground to bypass stale background sockets
+  // Direct server fetch on wake-up / foreground / manual refresh to bypass stale background sockets
   const fetchFreshMealLog = useCallback(async () => {
     if (!householdId) return;
 
     const currentToday = getTodayDateString();
     setTodayDateString(currentToday);
+    setIsSyncing(true);
 
     if (isFirebaseConfigured && db) {
       try {
         const logRef = doc(db, "households", householdId, "logs", currentToday);
         let docSnap;
         try {
-          docSnap = await getDocFromServer(logRef);
+          // 2.5s race timeout so slow cellular networks don't hang the sync indicator
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Server fetch timeout")), 2500)
+          );
+          docSnap = await Promise.race([getDocFromServer(logRef), timeoutPromise]);
         } catch {
           docSnap = await getDoc(logRef);
         }
 
         if (docSnap && docSnap.exists()) {
-          setDailyLog(docSnap.data() as DailyMealLog);
+          const freshData = docSnap.data() as DailyMealLog;
+          setDailyLog(freshData);
+          setCachedMealLog(householdId, currentToday, freshData);
+        } else if (docSnap && !docSnap.exists()) {
+          const defaultLog = getDefaultDailyMealLog(currentToday);
+          setDailyLog(defaultLog);
+          setCachedMealLog(householdId, currentToday, defaultLog);
         }
+        setLastSyncedAt(Date.now());
       } catch (err) {
         console.warn("Failed to wake-up fetch meal log:", err);
+      } finally {
+        setIsSyncing(false);
       }
     } else {
-      const storageKey = `nomciu_log_${householdId}_${currentToday}`;
-      try {
-        const raw = localStorage.getItem(storageKey);
-        if (raw) setDailyLog(JSON.parse(raw));
-      } catch (_) {}
+      const cached = getCachedMealLog(householdId, currentToday);
+      if (cached) setDailyLog(cached);
+      setLastSyncedAt(Date.now());
+      setIsSyncing(false);
     }
   }, [householdId]);
 
@@ -148,14 +187,20 @@ export function useMeals(householdId: string | null, feederName: string) {
             payload.mealType === "dinner")
         ) {
           const mType = payload.mealType as MealType;
-          setDailyLog((prev) => ({
-            ...prev,
-            [mType]: {
-              completed: true,
-              fedBy: payload.fedBy || prev[mType]?.fedBy || "Roommate",
-              fedAt: payload.time || prev[mType]?.fedAt || formatTime(),
-            },
-          }));
+          setDailyLog((prev) => {
+            const updated = {
+              ...prev,
+              [mType]: {
+                completed: true,
+                fedBy: payload.fedBy || prev[mType]?.fedBy || "Roommate",
+                fedAt: payload.time || prev[mType]?.fedAt || formatTime(),
+              },
+            };
+            if (householdId) {
+              setCachedMealLog(householdId, todayDateString, updated);
+            }
+            return updated;
+          });
         }
         // 2. Fetch fresh document from Firestore server
         fetchFreshMealLog();
@@ -164,7 +209,15 @@ export function useMeals(householdId: string | null, feederName: string) {
 
     window.addEventListener("focus", handleWakeUp);
     window.addEventListener("pageshow", handleWakeUp);
+    window.addEventListener("online", handleWakeUp);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // 30s heartbeat: quietly verify fresh data while app is kept open on screen
+    const heartbeat = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        fetchFreshMealLog();
+      }
+    }, 30000);
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("message", handleServiceWorkerMessage);
@@ -173,19 +226,26 @@ export function useMeals(householdId: string | null, feederName: string) {
     return () => {
       window.removeEventListener("focus", handleWakeUp);
       window.removeEventListener("pageshow", handleWakeUp);
+      window.removeEventListener("online", handleWakeUp);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearInterval(heartbeat);
       if ("serviceWorker" in navigator) {
         navigator.serviceWorker.removeEventListener("message", handleServiceWorkerMessage);
       }
     };
-  }, [fetchFreshMealLog]);
+  }, [fetchFreshMealLog, householdId, todayDateString]);
 
   // Persist updated meal log
   const saveMealLog = useCallback(
     async (updatedLog: DailyMealLog) => {
       if (!householdId) return;
 
+      // 1. Instant local state update
       setDailyLog(updatedLog);
+
+      // 2. Instant synchronous persistent storage update (survives app kill / restart)
+      setCachedMealLog(householdId, todayDateString, updatedLog);
+      setLastSyncedAt(Date.now());
 
       if (isFirebaseConfigured && db) {
         try {
@@ -194,15 +254,13 @@ export function useMeals(householdId: string | null, feederName: string) {
         } catch (err) {
           console.error("Failed to save meal log to Firestore:", err);
         }
-      } else {
-        const storageKey = `nomciu_log_${householdId}_${todayDateString}`;
-        localStorage.setItem(storageKey, JSON.stringify(updatedLog));
+      }
 
-        if (typeof BroadcastChannel !== "undefined") {
-          const channel = new BroadcastChannel("nomciu_sync");
-          channel.postMessage({ type: "MEAL_UPDATE", householdId });
-          channel.close();
-        }
+      // Multi-tab broadcast
+      if (typeof BroadcastChannel !== "undefined") {
+        const channel = new BroadcastChannel("feedy_sync");
+        channel.postMessage({ type: "MEAL_UPDATE", householdId });
+        channel.close();
       }
     },
     [householdId, todayDateString]
@@ -284,6 +342,8 @@ export function useMeals(householdId: string | null, feederName: string) {
     todayDateString,
     dailyLog,
     isSyncing,
+    lastSyncedAt,
+    refreshMealLog: fetchFreshMealLog,
     feedMeal,
     toggleMeal,
     resetToday,

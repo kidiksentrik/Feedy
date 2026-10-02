@@ -13,6 +13,8 @@ import {
   saveStoredFeederName,
   getRecentHouseholds,
   recordRecentHousehold,
+  getCachedHousehold,
+  setCachedHousehold,
 } from "@/lib/storage";
 
 const STORAGE_KEYS = {
@@ -20,11 +22,14 @@ const STORAGE_KEYS = {
 };
 
 export function useHousehold() {
-  const [householdId, setHouseholdId] = useState<string | null>(null);
-  const [household, setHousehold] = useState<Household | null>(null);
-  const [feederName, setFeederName] = useState<string>("");
-  const [recentHouseholds, setRecentHouseholds] = useState<RecentHousehold[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [householdId, setHouseholdId] = useState<string | null>(() => getStoredHouseholdId());
+  const [household, setHousehold] = useState<Household | null>(() => getCachedHousehold());
+  const [feederName, setFeederName] = useState<string>(() => getStoredFeederName());
+  const [recentHouseholds, setRecentHouseholds] = useState<RecentHousehold[]>(() => getRecentHouseholds());
+  const [isLoading, setIsLoading] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return !getStoredHouseholdId();
+  });
   const [error, setError] = useState<string | null>(null);
 
   // 1. Initial load of persistent multi-layer storage on mount
@@ -33,10 +38,12 @@ export function useHousehold() {
     const storedFeeder = getStoredFeederName();
     const storedHouseholdId = getStoredHouseholdId();
     const recents = getRecentHouseholds();
+    const cachedH = getCachedHousehold(storedHouseholdId);
 
-    setFeederName(storedFeeder);
-    setHouseholdId(storedHouseholdId);
-    setRecentHouseholds(recents);
+    if (storedFeeder) setFeederName(storedFeeder);
+    if (storedHouseholdId) setHouseholdId(storedHouseholdId);
+    if (recents.length > 0) setRecentHouseholds(recents);
+    if (cachedH) setHousehold(cachedH);
 
     if (!storedHouseholdId) {
       setIsLoading(false);
@@ -51,12 +58,15 @@ export function useHousehold() {
       return;
     }
 
-    setIsLoading(true);
+    // Only set full blocking loader if we don't have a cached household in hand
+    if (!household) {
+      setIsLoading(true);
+    }
 
     // Safety timeout: Ensure app never hangs on loading state indefinitely
     const safetyTimer = setTimeout(() => {
       setIsLoading(false);
-    }, 3500);
+    }, 2500);
 
     if (isFirebaseConfigured && db) {
       const householdRef = doc(db, "households", householdId);
@@ -67,6 +77,7 @@ export function useHousehold() {
           if (docSnap.exists()) {
             const data = docSnap.data() as Household;
             setHousehold(data);
+            setCachedHousehold(data);
             saveStoredHouseholdId(data.id);
             recordRecentHousehold({
               id: data.id,
@@ -154,6 +165,7 @@ export function useHousehold() {
         if (docSnap && docSnap.exists()) {
           const data = docSnap.data() as Household;
           setHousehold(data);
+          setCachedHousehold(data);
         }
       } catch (err) {
         console.warn("Failed to wake-up sync household:", err);
@@ -349,6 +361,7 @@ export function useHousehold() {
   );
 
   return {
+    householdId,
     household,
     feederName,
     recentHouseholds,

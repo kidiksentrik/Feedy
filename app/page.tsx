@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Navbar } from "@/components/Navbar";
 import { PetHero } from "@/components/PetHero";
 import { FeedNowButton } from "@/components/FeedNowButton";
@@ -16,6 +16,7 @@ import { Loader2 } from "lucide-react";
 
 export default function Home() {
   const {
+    householdId,
     household,
     feederName,
     recentHouseholds,
@@ -28,13 +29,18 @@ export default function Home() {
     updatePetProfile,
   } = useHousehold();
 
+  // Parallel instant hydration: uses cached householdId immediately without waiting for Firestore household object
+  const activeHouseholdId = household?.id || householdId || null;
+
   const {
     dailyLog,
     isSyncing,
+    lastSyncedAt,
+    refreshMealLog,
     feedMeal,
     toggleMeal,
     resetToday,
-  } = useMeals(household?.id || null, feederName);
+  } = useMeals(activeHouseholdId, feederName);
 
   const {
     isSupported: isPushSupported,
@@ -48,6 +54,41 @@ export default function Home() {
   const [onboardingStep, setOnboardingStep] = useState<"household" | "feeder">("household");
   const [isInviteOpen, setIsInviteOpen] = useState(false);
   const [isEditPetOpen, setIsEditPetOpen] = useState(false);
+
+  // Mobile Pull-to-Refresh
+  const [pullY, setPullY] = useState(0);
+  const [isPulling, setIsPulling] = useState(false);
+  const touchStartY = useRef(0);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (typeof window !== "undefined" && window.scrollY <= 0) {
+      touchStartY.current = e.touches[0].clientY;
+      setIsPulling(true);
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isPulling || (typeof window !== "undefined" && window.scrollY > 0)) return;
+    const currentY = e.touches[0].clientY;
+    const diff = currentY - touchStartY.current;
+    if (diff > 0) {
+      // Damped pull distance
+      setPullY(Math.min(diff * 0.45, 75));
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (pullY > 48) {
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        try {
+          navigator.vibrate(35);
+        } catch (_) {}
+      }
+      refreshMealLog();
+    }
+    setPullY(0);
+    setIsPulling(false);
+  };
 
   // Check URL query param for automatic join link e.g. /?join=749201
   useEffect(() => {
@@ -122,7 +163,29 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen flex flex-col justify-between safe-top safe-bottom bg-[#0D0E13] text-stone-100 overflow-x-hidden">
+    <main
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      className="min-h-screen flex flex-col justify-between safe-top safe-bottom bg-[#0D0E13] text-stone-100 overflow-x-hidden"
+    >
+      {/* Mobile Pull-to-Refresh visual indicator */}
+      {pullY > 10 && (
+        <div
+          style={{ height: `${pullY}px` }}
+          className="w-full max-w-md mx-auto flex items-center justify-center overflow-hidden transition-all duration-75 text-xs font-bold gap-1.5 pt-1"
+        >
+          <Loader2
+            className={`w-4 h-4 ${
+              pullY > 48 ? "animate-spin text-emerald-400" : "text-nomciu-peach"
+            }`}
+          />
+          <span className={pullY > 48 ? "text-emerald-400" : "text-stone-400"}>
+            {pullY > 48 ? "Release to sync with server" : "Pull down to refresh"}
+          </span>
+        </div>
+      )}
+
       {/* Mobile-contained wrapper (Looks like native app on mobile & elegant mobile card on desktop) */}
       <div className="w-full max-w-md mx-auto flex-1 flex flex-col justify-between pb-6 overflow-x-hidden">
         <div>
@@ -132,6 +195,9 @@ export default function Home() {
             feederName={feederName}
             isDemoMode={isDemoMode}
             isPushSubscribed={isPushSubscribed}
+            isSyncing={isSyncing}
+            lastSyncedAt={lastSyncedAt}
+            onRefresh={refreshMealLog}
             onTogglePush={isPushSubscribed ? undefined : subscribeToPush}
             onSendTestPush={handleSendTestPush}
             onOpenInvite={() => setIsInviteOpen(true)}

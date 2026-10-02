@@ -1,5 +1,11 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from "firebase/app";
-import { getFirestore, Firestore } from "firebase/firestore";
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  Firestore,
+} from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -26,7 +32,19 @@ let db: Firestore | null = null;
 if (isFirebaseConfigured) {
   try {
     app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-    db = getFirestore(app);
+    if (typeof window !== "undefined") {
+      try {
+        db = initializeFirestore(app, {
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+          }),
+        });
+      } catch {
+        db = getFirestore(app);
+      }
+    } else {
+      db = getFirestore(app);
+    }
   } catch (err) {
     console.warn("Failed to initialize Firebase SDK:", err);
   }
